@@ -1,0 +1,103 @@
+BASH - export OPENAI_API_KEY="your_api_key_here" (for data residence you can reach out to OpenAI and request - no data residency / zero-data-retention when utilising the API)
+
+PY Code:
+import os
+import csv
+import pandas as pd
+from openai import OpenAI
+
+# === CONFIGURATION ===
+TEXT_FOLDER = "txt_files"
+CONFIG_FILE = "config.csv"
+OUTPUT_FILE = "relevancy_results.csv"
+
+# === INITIALIZE CLIENT ===
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+# === STEP 1: Get RISEN framework input ===
+print("Please provide your RISEN prompt or instruction:")
+RISEN_PROMPT = input(">> ").strip()
+
+# === STEP 2: Load temperature configuration ===
+def load_temperature_from_csv(file_path):
+    try:
+        df = pd.read_csv(file_path)
+        # Expecting a column called "temperature" in the CSV
+        temp = float(df['temperature'].iloc[0])
+        print(f"Using temperature setting from CSV: {temp}")
+        return temp
+    except Exception as e:
+        print(f"Error reading config CSV. Defaulting temperature to 0.7. Details: {e}")
+        return 0.7
+
+temperature = load_temperature_from_csv(CONFIG_FILE)
+
+# === STEP 3: Get list of text files ===
+text_files = [f for f in os.listdir(TEXT_FOLDER) if f.endswith(".txt")]
+
+# === STEP 4: Analyze relevancy using OpenAI ===
+results = []
+
+for file_name in text_files:
+    file_path = os.path.join(TEXT_FOLDER, file_name)
+    with open(file_path, "r", encoding="utf-8") as f:
+        text_content = f.read()
+
+    print(f"Analyzing {file_name}...")
+
+    # Construct prompt for model
+    system_prompt = f"""
+    You are an expert evaluator following the RISEN framework (Relevance, Insight, Specificity, Evidence, Novelty).
+    Evaluate how relevant this document is to the user's RISEN prompt below.
+
+    Provide:
+    1. A numeric relevancy score from 0 (not relevant) to 100 (highly relevant)
+    2. A short annotation explaining why
+    """
+
+    user_prompt = f"""
+    RISEN Prompt:
+    {RISEN_PROMPT}
+
+    Document Content:
+    {text_content[:4000]}  # Limit input for token efficiency
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=temperature,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ]
+    )
+
+    output = response.choices[0].message.content
+
+    # Simple parsing: assume model returns in format "Score: X\nAnnotation: ..."
+    score = None
+    annotation = ""
+    for line in output.splitlines():
+        if "score" in line.lower():
+            try:
+                score = int(''.join(filter(str.isdigit, line)))
+            except:
+                score = None
+        elif "annotation" in line.lower() or "comment" in line.lower():
+            annotation = line.split(":", 1)[-1].strip()
+
+    results.append({
+        "Document Name": file_name,
+        "Relevancy Score": score if score is not None else "N/A",
+        "Annotation/Comments": annotation if annotation else output
+    })
+
+# === STEP 5: Write results to CSV ===
+with open(OUTPUT_FILE, "w", newline="", encoding="utf-8") as csvfile:
+    fieldnames = ["Document Name", "Relevancy Score", "Annotation/Comments"]
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer.writeheader()
+    for r in results:
+        writer.writerow(r)
+
+print(f"\n✅ Analysis complete. Results saved to {OUTPUT_FILE}")
